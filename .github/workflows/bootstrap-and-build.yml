@@ -1,0 +1,105 @@
+name: Bootstrap and build Android APK
+
+on:
+  push:
+    branches:
+      - bootstrap-upload
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reconstruct source archive
+        id: bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          if compgen -G '.bootstrap_core/part_*' > /dev/null; then
+            find .bootstrap_core -maxdepth 1 -type f -name 'part_*' | sort | xargs cat > /tmp/source.b64
+            base64 --decode /tmp/source.b64 > /tmp/source.zip
+            echo '07c7762839e4440af463354253c2a588cf9696bc9e5eaafff32d8dfffabb139d  /tmp/source.zip' | sha256sum --check --strict
+            unzip -t /tmp/source.zip
+            unzip -oq /tmp/source.zip -d "$GITHUB_WORKSPACE"
+            rm -rf .bootstrap_core .bootstrap
+            chmod +x gradlew gradlew-bootstrap build-apk.sh validate-source.sh || true
+            echo 'materialized=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'materialized=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit materialized source
+        if: steps.bootstrap.outputs.materialized == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m 'chore: materialize Android source'
+            git push origin HEAD:bootstrap-upload
+          fi
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 36
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
+
+      - name: Set up Gradle 9.5.0
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.0'
+
+      - name: Show build environment
+        shell: bash
+        run: |
+          java -version
+          gradle --version
+          sdkmanager --list_installed
+
+      - name: Validate source
+        shell: bash
+        run: bash validate-source.sh
+
+      - name: Run unit tests
+        shell: bash
+        run: gradle --no-daemon --stacktrace :app:testDebugUnitTest
+
+      - name: Assemble debug APK
+        shell: bash
+        run: gradle --no-daemon --stacktrace :app:assembleDebug
+
+      - name: Run lint
+        shell: bash
+        run: gradle --no-daemon --stacktrace :app:lintDebug
+
+      - name: Upload debug APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: LocalMusicPlayer-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
