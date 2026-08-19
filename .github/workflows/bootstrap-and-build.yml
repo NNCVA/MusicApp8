@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - bootstrap-upload
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
